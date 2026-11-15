@@ -5,8 +5,16 @@
 # Keep to this simple layout: top-level section names, indented "key: value"
 # lines underneath. Remove or leave out any service you don't use.
 
+run:
+  base_dir: /docker            # optional; default: /docker
+  backup_script: backup.sh    # optional; relative path, arguments may follow
+  log_subdir: backup_logs     # optional; default: backup_logs
+
 notify:
   on: always            # always = notify on every run; error = only if something failed
+
+post_run:
+  script: cleanup.sh    # optional; arguments may follow the script path
 
 gotify:
   enabled: true         # optional, set to false to turn off without deleting the settings
