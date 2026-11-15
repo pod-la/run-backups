@@ -11,49 +11,60 @@
 # finishes (and on fatal errors). Settings live in a YAML file, by default
 # ~/.config/run-backups/config.yaml - see run-backups.example.yaml.
 
-# ---- Defaults (override with command line options) --------------------------
+# ---- Defaults (override with config file or command line options) -----------
 BASE_DIR="/docker"
 BACKUP_SCRIPT="backup.sh"
 LOG_SUBDIR="backup_logs"
+POST_RUN_SCRIPT=""
 DRY_RUN=0   # 1 = only show what would be done (same as -n)
-CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/run-backups/config.yaml"
+VERBOSE=0
+CONFIG_FILE="${RUN_BACKUPS_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/run-backups/config.yaml}"
 # -----------------------------------------------------------------------------
 
 CONFIG_EXPLICIT=0
+BASE_DIR_EXPLICIT=0
+BACKUP_SCRIPT_EXPLICIT=0
+LOG_SUBDIR_EXPLICIT=0
+POST_RUN_EXPLICIT=0
 
 usage() {
     cat <<USAGE
-Usage: $(basename "$0") [-d base_dir] [-s script_name] [-l log_subdir]
-                        [-c config_file] [-n] [-h]
+Usage: $(basename "$0") [-d base_dir] [-s backup_command] [-l log_subdir]
+                        [-p post_run_script]
+                        [-c config_file] [-n] [-v] [-h]
 
   -d DIR     Base directory containing the subdirectories to scan
              (default: $BASE_DIR)
-  -s NAME    Name of the backup script to look for in each subdirectory
+  -s CMD     Relative backup script path and optional arguments; searched under
+             each directory (absolute paths are not allowed)
              (default: $BACKUP_SCRIPT)
   -l NAME    Name of the log subdirectory created inside each subdirectory
              (default: $LOG_SUBDIR)
+  -p CMD     Post-run script and optional arguments, run after each backup
+             (default: none; use -p "" to disable a YAML-configured script)
   -c FILE    YAML file with Gotify/ntfy notification settings
              (default: $CONFIG_FILE)
   -n         Dry run: show what would be done, but don't run any backup
              scripts, create log files, or send notifications
+  -v         Verbose: show effective configuration and command output
   -h         Show this help
 USAGE
 }
 
-while getopts ":d:s:l:c:nh" opt; do
+while getopts ":d:s:l:p:c:nvh" opt; do
     case "$opt" in
-        d) BASE_DIR="$OPTARG" ;;
-        s) BACKUP_SCRIPT="$OPTARG" ;;
-        l) LOG_SUBDIR="$OPTARG" ;;
+        d) BASE_DIR="$OPTARG"; BASE_DIR_EXPLICIT=1 ;;
+        s) BACKUP_SCRIPT="$OPTARG"; BACKUP_SCRIPT_EXPLICIT=1 ;;
+        l) LOG_SUBDIR="$OPTARG"; LOG_SUBDIR_EXPLICIT=1 ;;
+        p) POST_RUN_SCRIPT="$OPTARG"; POST_RUN_EXPLICIT=1 ;;
         c) CONFIG_FILE="$OPTARG"; CONFIG_EXPLICIT=1 ;;
         n) DRY_RUN=1 ;;
+        v) VERBOSE=1 ;;
         h) usage; exit 0 ;;
         :) echo "Option -$OPTARG requires an argument." >&2; usage >&2; exit 2 ;;
         \?) echo "Unknown option: -$OPTARG" >&2; usage >&2; exit 2 ;;
     esac
 done
-
-BASE_DIR="${BASE_DIR%/}"
 
 # Timestamp helpers
 now()   { date '+%Y-%m-%d %H:%M:%S'; }
@@ -108,6 +119,17 @@ load_config() {
         return 0    # no config = notifications simply off
     fi
 
+    local v
+    if [[ $BASE_DIR_EXPLICIT -eq 0 ]]; then
+        v="$(cfg run base_dir)"; [[ -n "$v" ]] && BASE_DIR="$v"
+    fi
+    if [[ $BACKUP_SCRIPT_EXPLICIT -eq 0 ]]; then
+        v="$(cfg run backup_script)"; [[ -n "$v" ]] && BACKUP_SCRIPT="$v"
+    fi
+    if [[ $LOG_SUBDIR_EXPLICIT -eq 0 ]]; then
+        v="$(cfg run log_subdir)"; [[ -n "$v" ]] && LOG_SUBDIR="$v"
+    fi
+
     # The file holds tokens/passwords, so warn if others can read it
     local perm
     perm="$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null)"
@@ -115,7 +137,6 @@ load_config() {
         echo "WARNING: $CONFIG_FILE is accessible by other users (mode $perm); consider: chmod 600 '$CONFIG_FILE'" >&2
     fi
 
-    local v
     v="$(cfg notify on)"
     case "$v" in
         ""|always) NOTIFY_ON="always" ;;
@@ -150,6 +171,10 @@ load_config() {
         else
             echo "WARNING: ntfy needs both 'url' and 'topic'; ntfy notifications disabled." >&2
         fi
+    fi
+
+    if [[ $POST_RUN_EXPLICIT -eq 0 ]]; then
+        POST_RUN_SCRIPT="$(cfg post_run script)"
     fi
 
     if [[ $((GOTIFY_ON + NTFY_ON)) -gt 0 ]] && ! command -v curl >/dev/null 2>&1; then
@@ -203,9 +228,72 @@ notify() {
     return 0
 }
 
+print_config_summary() {
+    local gotify_auth="no" ntfy_auth="no" post_run="none"
+    [[ -n "$GOTIFY_TOKEN" ]] && gotify_auth="yes"
+    [[ -n "$NTFY_TOKEN$NTFY_USER$NTFY_PASSWORD" ]] && ntfy_auth="yes"
+    [[ ${#POST_RUN_ARGS[@]} -gt 0 ]] && post_run="$POST_RUN_SCRIPT"
+
+    echo "[CONFIG] Effective configuration:"
+    echo "  Config file: $CONFIG_FILE"
+    echo "  Base directory: $BASE_DIR"
+    echo "  Backup command: $BACKUP_SCRIPT"
+    echo "  Log subdirectory: $LOG_SUBDIR"
+    echo "  Post-run command: $post_run"
+    echo "  Dry run: $([[ $DRY_RUN -eq 1 ]] && echo yes || echo no)"
+    echo "  Notifications: $NOTIFY_ON"
+    echo "  Gotify: $([[ $GOTIFY_ON -eq 1 ]] && echo enabled || echo disabled); token configured: $gotify_auth; priorities: $GOTIFY_PRIORITY/$GOTIFY_ERROR_PRIORITY"
+    echo "  ntfy: $([[ $NTFY_ON -eq 1 ]] && echo enabled || echo disabled); authentication configured: $ntfy_auth; priorities: $NTFY_PRIORITY/$NTFY_ERROR_PRIORITY"
+}
+
+run_logged() {
+    local log_file="$1"
+    shift
+
+    if [[ $VERBOSE -eq 1 ]]; then
+        "$@" 2>&1 | tee -a "$log_file"
+        local -a pipeline_status=("${PIPESTATUS[@]}")
+        [[ ${pipeline_status[0]} -ne 0 ]] && return "${pipeline_status[0]}"
+        return "${pipeline_status[1]}"
+    fi
+
+    "$@" >>"$log_file" 2>&1
+}
+
+run_backup_command() {
+    local dir="$1"
+    (
+        cd "$dir" || exit 1
+        local backup_run_path="./$BACKUP_COMMAND"
+        if [[ -x "$backup_run_path" ]]; then
+            "$backup_run_path" "${BACKUP_ARGS[@]:1}"
+        else
+            bash -- "$backup_run_path" "${BACKUP_ARGS[@]:1}"
+        fi
+    )
+}
+
+run_post_run_command() {
+    local dir="$1"
+    (
+        cd "$dir" || exit 1
+        local post_run_command="${POST_RUN_ARGS[0]}"
+        if [[ -x "$post_run_command" ]]; then
+            if [[ "$post_run_command" == */* ]]; then
+                "$post_run_command" "${POST_RUN_ARGS[@]:1}"
+            else
+                "./$post_run_command" "${POST_RUN_ARGS[@]:1}"
+            fi
+        else
+            bash -- "$post_run_command" "${POST_RUN_ARGS[@]:1}"
+        fi
+    )
+}
+
 # ---- Main -------------------------------------------------------------------
 
 load_config
+BASE_DIR="${BASE_DIR%/}"
 HOST="$(hostname -s 2>/dev/null || hostname)"
 
 if [[ ! -d "$BASE_DIR" ]]; then
@@ -221,6 +309,32 @@ if [[ $DRY_RUN -eq 1 ]]; then
     echo "[DRY RUN] Scanning $BASE_DIR for $BACKUP_SCRIPT (no scripts will be run)"
 fi
 
+POST_RUN_ARGS=()
+if [[ -n "$POST_RUN_SCRIPT" ]]; then
+    read -r -a POST_RUN_ARGS <<< "$POST_RUN_SCRIPT"
+fi
+
+BACKUP_ARGS=()
+if [[ -n "$BACKUP_SCRIPT" ]]; then
+    read -r -a BACKUP_ARGS <<< "$BACKUP_SCRIPT"
+fi
+BACKUP_COMMAND="${BACKUP_ARGS[0]}"
+BACKUP_FILE="${BACKUP_COMMAND##*/}"
+if [[ "$BACKUP_COMMAND" == /* ]]; then
+    echo "Error: backup script path must be relative to each scanned directory." >&2
+    exit 2
+fi
+case "/$BACKUP_COMMAND/" in
+    */../*)
+        echo "Error: backup script path must not escape the scanned directory." >&2
+        exit 2
+        ;;
+esac
+
+if [[ $VERBOSE -eq 1 ]]; then
+    print_config_summary
+fi
+
 found=0
 succeeded=0
 failed=0
@@ -231,20 +345,24 @@ for dir in "$BASE_DIR"/*/; do
     name="$(basename "$dir")"
 
     # Skip directories without the backup script
-    [[ -f "$dir/$BACKUP_SCRIPT" ]] || continue
+    backup_path="$dir/$BACKUP_COMMAND"
+    [[ -f "$backup_path" ]] || continue
 
     found=$((found + 1))
     log_dir="$dir/$LOG_SUBDIR"
-    log_file="$log_dir/${BACKUP_SCRIPT%.*}-$(stamp).log"
+    log_file="$log_dir/${BACKUP_FILE%.*}-$(stamp).log"
 
     if [[ $DRY_RUN -eq 1 ]]; then
-        if [[ -x "$dir/$BACKUP_SCRIPT" ]]; then
+        if [[ -x "$backup_path" ]]; then
             how="directly"
         else
             how="via bash (not executable)"
         fi
-        echo "[DRY RUN] $name: would run $dir/$BACKUP_SCRIPT $how"
+        echo "[DRY RUN] $name: would run $BACKUP_SCRIPT $how"
         echo "[DRY RUN] $name: would log to $log_file"
+        if [[ ${#POST_RUN_ARGS[@]} -gt 0 ]]; then
+            echo "[DRY RUN] $name: would run post-run script $POST_RUN_SCRIPT within $dir"
+        fi
         continue
     fi
 
@@ -256,29 +374,33 @@ for dir in "$BASE_DIR"/*/; do
     fi
 
     echo "[$(now)] $name: running $BACKUP_SCRIPT (log: $log_file)"
-    echo "=== [$(now)] START $dir/$BACKUP_SCRIPT ===" >>"$log_file"
+    echo "=== [$(now)] START $backup_path ===" >>"$log_file"
 
-    # Run inside a subshell so the cd doesn't leak and so a failing script
-    # can't affect this one. Use the script directly if it's executable,
-    # otherwise fall back to bash.
-    (
-        cd "$dir" || exit 1
-        if [[ -x "./$BACKUP_SCRIPT" ]]; then
-            "./$BACKUP_SCRIPT"
-        else
-            bash "./$BACKUP_SCRIPT"
-        fi
-    ) >>"$log_file" 2>&1
+    run_logged "$log_file" run_backup_command "$dir"
     rc=$?
 
-    if [[ $rc -eq 0 ]]; then
-        echo "=== [$(now)] END (exit code 0) ===" >>"$log_file"
+    echo "=== [$(now)] END (exit code $rc) ===" >>"$log_file"
+    if [[ $rc -ne 0 ]]; then
+        msg="[$(now)] ERROR: $name: $BACKUP_SCRIPT failed with exit code $rc"
+        echo "$msg" | tee -a "$log_file" >&2
+    fi
+
+    post_rc=0
+    if [[ ${#POST_RUN_ARGS[@]} -gt 0 ]]; then
+        echo "[$(now)] $name: running post-run script $POST_RUN_SCRIPT"
+        run_logged "$log_file" run_post_run_command "$dir"
+        post_rc=$?
+    fi
+
+    if [[ $post_rc -ne 0 ]]; then
+        msg="[$(now)] ERROR: $name: post-run script $POST_RUN_SCRIPT failed with exit code $post_rc"
+        echo "$msg" >&2
+    fi
+
+    if [[ $rc -eq 0 && $post_rc -eq 0 ]]; then
         echo "[$(now)] $name: completed successfully"
         succeeded=$((succeeded + 1))
     else
-        msg="[$(now)] ERROR: $name: $BACKUP_SCRIPT failed with exit code $rc"
-        echo "$msg" | tee -a "$log_file" >&2
-        echo "=== [$(now)] END (exit code $rc) ===" >>"$log_file"
         failed=$((failed + 1))
         failed_dirs+=("$name")
     fi
