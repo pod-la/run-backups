@@ -16,6 +16,8 @@ BASE_DIR="/docker"
 BACKUP_SCRIPT="backup.sh"
 LOG_SUBDIR="backup_logs"
 POST_RUN_SCRIPT=""
+INCLUDE_DIRS=()
+EXCLUDE_DIRS=()
 DRY_RUN=0   # 1 = only show what would be done (same as -n)
 VERBOSE=0
 CONFIG_FILE="${RUN_BACKUPS_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/run-backups/config.yaml}"
@@ -26,11 +28,14 @@ BASE_DIR_EXPLICIT=0
 BACKUP_SCRIPT_EXPLICIT=0
 LOG_SUBDIR_EXPLICIT=0
 POST_RUN_EXPLICIT=0
+INCLUDE_DIRS_EXPLICIT=0
+EXCLUDE_DIRS_EXPLICIT=0
 
 usage() {
     cat <<USAGE
 Usage: $(basename "$0") [-d base_dir] [-s backup_command] [-l log_subdir]
                         [-p post_run_script]
+                        [-i glob]... [-e glob]...
                         [-c config_file] [-n] [-v] [-h]
 
   -d DIR     Base directory containing the subdirectories to scan
@@ -42,6 +47,8 @@ Usage: $(basename "$0") [-d base_dir] [-s backup_command] [-l log_subdir]
              (default: $LOG_SUBDIR)
   -p CMD     Post-run script and optional arguments, run after each backup
              (default: none; use -p "" to disable a YAML-configured script)
+  -i GLOB    Include matching directory names (repeatable; default: all)
+  -e GLOB    Exclude matching directory names (repeatable; applied after includes)
   -c FILE    YAML file with Gotify/ntfy notification settings
              (default: $CONFIG_FILE)
   -n         Dry run: show what would be done, but don't run any backup
@@ -51,12 +58,14 @@ Usage: $(basename "$0") [-d base_dir] [-s backup_command] [-l log_subdir]
 USAGE
 }
 
-while getopts ":d:s:l:p:c:nvh" opt; do
+while getopts ":d:s:l:p:i:e:c:nvh" opt; do
     case "$opt" in
         d) BASE_DIR="$OPTARG"; BASE_DIR_EXPLICIT=1 ;;
         s) BACKUP_SCRIPT="$OPTARG"; BACKUP_SCRIPT_EXPLICIT=1 ;;
         l) LOG_SUBDIR="$OPTARG"; LOG_SUBDIR_EXPLICIT=1 ;;
         p) POST_RUN_SCRIPT="$OPTARG"; POST_RUN_EXPLICIT=1 ;;
+        i) INCLUDE_DIRS_EXPLICIT=1; [[ -n "$OPTARG" ]] && INCLUDE_DIRS+=("$OPTARG") ;;
+        e) EXCLUDE_DIRS_EXPLICIT=1; [[ -n "$OPTARG" ]] && EXCLUDE_DIRS+=("$OPTARG") ;;
         c) CONFIG_FILE="$OPTARG"; CONFIG_EXPLICIT=1 ;;
         n) DRY_RUN=1 ;;
         v) VERBOSE=1 ;;
@@ -128,6 +137,18 @@ load_config() {
     fi
     if [[ $LOG_SUBDIR_EXPLICIT -eq 0 ]]; then
         v="$(cfg run log_subdir)"; [[ -n "$v" ]] && LOG_SUBDIR="$v"
+    fi
+    if [[ $INCLUDE_DIRS_EXPLICIT -eq 0 ]]; then
+        v="$(cfg run include_dirs)"
+        if [[ -n "$v" ]]; then
+            read -r -a INCLUDE_DIRS <<< "$v"
+        fi
+    fi
+    if [[ $EXCLUDE_DIRS_EXPLICIT -eq 0 ]]; then
+        v="$(cfg run exclude_dirs)"
+        if [[ -n "$v" ]]; then
+            read -r -a EXCLUDE_DIRS <<< "$v"
+        fi
     fi
 
     # The file holds tokens/passwords, so warn if others can read it
@@ -230,6 +251,7 @@ notify() {
 
 print_config_summary() {
     local gotify_auth="no" ntfy_auth="no" post_run="none"
+    local include_dirs="${INCLUDE_DIRS[*]:-all}" exclude_dirs="${EXCLUDE_DIRS[*]:-none}"
     [[ -n "$GOTIFY_TOKEN" ]] && gotify_auth="yes"
     [[ -n "$NTFY_TOKEN$NTFY_USER$NTFY_PASSWORD" ]] && ntfy_auth="yes"
     [[ ${#POST_RUN_ARGS[@]} -gt 0 ]] && post_run="$POST_RUN_SCRIPT"
@@ -240,10 +262,22 @@ print_config_summary() {
     echo "  Backup command: $BACKUP_SCRIPT"
     echo "  Log subdirectory: $LOG_SUBDIR"
     echo "  Post-run command: $post_run"
+    echo "  Include directory globs: $include_dirs"
+    echo "  Exclude directory globs: $exclude_dirs"
     echo "  Dry run: $([[ $DRY_RUN -eq 1 ]] && echo yes || echo no)"
     echo "  Notifications: $NOTIFY_ON"
     echo "  Gotify: $([[ $GOTIFY_ON -eq 1 ]] && echo enabled || echo disabled); token configured: $gotify_auth; priorities: $GOTIFY_PRIORITY/$GOTIFY_ERROR_PRIORITY"
     echo "  ntfy: $([[ $NTFY_ON -eq 1 ]] && echo enabled || echo disabled); authentication configured: $ntfy_auth; priorities: $NTFY_PRIORITY/$NTFY_ERROR_PRIORITY"
+}
+
+matches_any_glob() {
+    local name="$1"
+    shift
+    local pattern
+    for pattern in "$@"; do
+        [[ "$name" == $pattern ]] && return 0
+    done
+    return 1
 }
 
 run_logged() {
@@ -343,6 +377,13 @@ failed_dirs=()
 for dir in "$BASE_DIR"/*/; do
     dir="${dir%/}"
     name="$(basename "$dir")"
+
+    if [[ ${#INCLUDE_DIRS[@]} -gt 0 ]] && ! matches_any_glob "$name" "${INCLUDE_DIRS[@]}"; then
+        continue
+    fi
+    if [[ ${#EXCLUDE_DIRS[@]} -gt 0 ]] && matches_any_glob "$name" "${EXCLUDE_DIRS[@]}"; then
+        continue
+    fi
 
     # Skip directories without the backup script
     backup_path="$dir/$BACKUP_COMMAND"

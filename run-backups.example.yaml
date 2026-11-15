@@ -9,6 +9,8 @@ run:
   base_dir: /docker            # optional; default: /docker
   backup_script: backup.sh    # optional; relative path, arguments may follow
   log_subdir: backup_logs     # optional; default: backup_logs
+  include_dirs: "app-* media" # optional; space-separated directory-name globs
+  exclude_dirs: "app-test *-old" # optional; applied after include_dirs
 
 notify:
   on: always            # always = notify on every run; error = only if something failed

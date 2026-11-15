@@ -63,6 +63,8 @@ run:
   base_dir: /docker
   backup_script: backup.sh
   log_subdir: backup_logs
+  include_dirs: "app-* media"
+  exclude_dirs: "app-test *-old"
 
 notify:
   on: always
@@ -84,6 +86,14 @@ The `run` values override the built-in defaults. Command-line `-d`, `-s`, and
 separated by spaces. The script path is searched for inside each scanned
 directory, including its subdirectories; absolute paths and paths that escape
 the scanned directory are rejected.
+
+Directory filters match directory names (not full paths) using shell glob
+patterns such as `app-*` or `media`. By default all directories are included.
+When include patterns are configured, only matching directories are considered;
+exclude patterns are then applied to remove matches. Use space-separated
+patterns in YAML, or repeat `-i GLOB` and `-e GLOB` on the command line.
+Command-line filters replace the corresponding YAML filter; `-i ""` or
+`-e ""` clears that filter.
 
 The config file is expected to hold secret tokens, so it should be locked down with restrictive permissions, for example:
 
@@ -119,6 +129,7 @@ Common options:
 ./run-backups.sh -s "backup.sh --verbose"
 ./run-backups.sh -l backup_logs
 ./run-backups.sh -p cleanup.sh
+./run-backups.sh -i "app-*" -i media -e "app-test"
 ./run-backups.sh -c /path/to/config.yaml
 RUN_BACKUPS_CONFIG_FILE=/path/to/config.yaml ./run-backups.sh
 ./run-backups.sh -v
@@ -132,6 +143,10 @@ RUN_BACKUPS_CONFIG_FILE=/path/to/config.yaml ./run-backups.sh
   searched for in each directory and its subdirectories
 - `-l NAME`: log subdirectory name
 - `-p CMD`: post-run script and optional arguments (default: none)
+- `-i GLOB`: include directory names matching this glob; repeatable (default:
+  include all)
+- `-e GLOB`: exclude directory names matching this glob; repeatable (applied
+  after include patterns)
 - `-c FILE`: config file path
 - `-n`: dry run; show what would happen without running anything
 - `-v`: show the effective configuration and stream command output to the
