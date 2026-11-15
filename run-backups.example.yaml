@@ -1,0 +1,26 @@
+# Config for run-backups.sh
+# Save as ~/.config/run-backups/config.yaml and lock it down (it holds secrets):
+#   chmod 600 ~/.config/run-backups/config.yaml
+#
+# Keep to this simple layout: top-level section names, indented "key: value"
+# lines underneath. Remove or leave out any service you don't use.
+
+notify:
+  on: always            # always = notify on every run; error = only if something failed
+
+gotify:
+  enabled: true         # optional, set to false to turn off without deleting the settings
+  url: https://gotify.example.com
+  token: AbCdEfGhIjKlMnO        # application token
+  priority: 5           # optional, normal runs (default 5)
+  error_priority: 8     # optional, runs with failures (default 8)
+
+ntfy:
+  enabled: true         # optional
+  url: https://ntfy.example.com   # or https://ntfy.sh
+  topic: docker-backups
+  token: tk_xxxxxxxxxxxxxxxxxxxx  # optional access token (Bearer)
+  # username: me                  # optional, alternative to token
+  # password: secret
+  priority: default     # optional: min, low, default, high, max
+  error_priority: high  # optional
